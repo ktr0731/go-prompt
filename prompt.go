@@ -2,10 +2,16 @@ package prompt
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"time"
 
-	"github.com/c-bata/go-prompt/internal/debug"
+	"github.com/ktr0731/go-prompt/internal/debug"
+)
+
+var (
+	ErrAbort = errors.New("abort")
 )
 
 // Executor is called when user input something text.
@@ -57,7 +63,7 @@ func (p *Prompt) Run() {
 	for {
 		select {
 		case b := <-bufCh:
-			if shouldExit, e := p.feed(b); shouldExit {
+			if e, err := p.feed(b); err == io.EOF {
 				p.renderer.BreakLine(p.buf)
 				stopReadBufCh <- struct{}{}
 				stopHandleSignalCh <- struct{}{}
@@ -96,7 +102,7 @@ func (p *Prompt) Run() {
 	}
 }
 
-func (p *Prompt) feed(b []byte) (shouldExit bool, exec *Exec) {
+func (p *Prompt) feed(b []byte) (exec *Exec, _ error) {
 	key := GetKey(b)
 
 	// completion
@@ -116,6 +122,7 @@ func (p *Prompt) feed(b []byte) (shouldExit bool, exec *Exec) {
 		p.renderer.BreakLine(p.buf)
 		p.buf = NewBuffer()
 		p.history.Clear()
+		return nil, ErrAbort
 	case Up, ControlP:
 		if !completing { // Don't use p.completion.Completing() because it takes double operation when switch to selected=-1.
 			if newBuf, changed := p.history.Older(p.buf); changed {
@@ -131,8 +138,7 @@ func (p *Prompt) feed(b []byte) (shouldExit bool, exec *Exec) {
 		}
 	case ControlD:
 		if p.buf.Text() == "" {
-			shouldExit = true
-			return
+			return nil, io.EOF
 		}
 	case NotDefined:
 		if p.handleASCIICodeBinding(b) {
@@ -209,7 +215,7 @@ func (p *Prompt) handleASCIICodeBinding(b []byte) bool {
 }
 
 // Input just returns user input text.
-func (p *Prompt) Input() string {
+func (p *Prompt) Input() (string, error) {
 	defer debug.Teardown()
 	debug.Log("start prompt")
 	p.setUp()
@@ -223,18 +229,21 @@ func (p *Prompt) Input() string {
 	bufCh := make(chan []byte, 128)
 	stopReadBufCh := make(chan struct{})
 	go p.readBuffer(bufCh, stopReadBufCh)
+	defer func() {
+		// Stop goroutine to run readBuffer function
+		stopReadBufCh <- struct{}{}
+	}()
 
 	for {
 		select {
 		case b := <-bufCh:
-			if shouldExit, e := p.feed(b); shouldExit {
+			if e, err := p.feed(b); err == io.EOF {
 				p.renderer.BreakLine(p.buf)
-				stopReadBufCh <- struct{}{}
-				return ""
+				return "", io.EOF
+			} else if err != nil {
+				return "", err
 			} else if e != nil {
-				// Stop goroutine to run readBuffer function
-				stopReadBufCh <- struct{}{}
-				return e.input
+				return e.input, nil
 			} else {
 				p.completion.Update(*p.buf.Document())
 				p.renderer.Render(p.buf, p.completion)
